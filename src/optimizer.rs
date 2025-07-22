@@ -100,31 +100,31 @@ impl MediaOptimizer {
         
         // Log configuration details
         if self.config.convert_to_webp {
-            info!("🎯 Mode: Convert all media to WebP (quality: {})", self.config.webp_quality);
+            info!("Mode: Convert all media to WebP (quality: {})", self.config.webp_quality);
         } else {
-            info!("🎯 Mode: Optimize in original formats (JPEG quality: {})", self.config.jpeg_quality);
+            info!("Mode: Optimize in original formats (JPEG quality: {})", self.config.jpeg_quality);
         }
         
         // Log the keep_processed flag status if output directory is used
         if let Some(ref output_path) = self.config.output_path {
-            info!("📁 Output directory: {}", output_path.display());
+            info!("Output directory: {}", output_path.display());
             if self.config.keep_processed {
-                info!("⏩ Skip mode: Will skip files where output already exists");
+                info!("Skip mode: Will skip files where output already exists");
             } else {
-                info!("🔄 Overwrite mode: Will overwrite existing output files");
+                info!("Overwrite mode: Will overwrite existing output files");
             }
         } else {
-            info!("📁 Mode: Replace files in place");
+            info!("Mode: Replace files in place");
         }
         
         if self.config.dry_run {
-            info!("🧪 Dry run mode: No files will be modified");
+            info!("Dry run mode: No files will be modified");
         }
         
         if self.config.skip_video_compression {
-            info!("🎬 Video mode: Skip compression (copy only)");
+            info!("Video mode: Skip compression (copy only)");
         } else {
-            info!("🎬 Video mode: Compress videos (CRF: {})", self.config.video_crf);
+            info!("Video mode: Compress videos (CRF: {})", self.config.video_crf);
         }
         
         // Check dependencies
@@ -148,10 +148,18 @@ impl MediaOptimizer {
         
         // Process files with controlled concurrency
         let semaphore = Arc::new(Semaphore::new(self.config.workers));
+        let video_semaphore = Arc::new(Semaphore::new(1)); // Limita a un video alla volta
         let mut tasks = Vec::new();
-        
+
         for file_path in files {
             let permit = semaphore.clone().acquire_owned().await?;
+            let is_video = FileManager::is_video(&file_path);
+            let video_permit = if is_video {
+                Some(video_semaphore.clone().acquire_owned().await?)
+            } else {
+                None
+            };
+
             let task_optimizer = TaskOptimizer {
                 config: self.config.clone(),
                 image_processor: ImageProcessor::new(self.config.clone()),
@@ -159,13 +167,14 @@ impl MediaOptimizer {
                 input_base_dir: self.input_base_dir.clone(),
             };
             let progress_clone = progress.clone();
-            
+
             let task = tokio::spawn(async move {
                 let _permit = permit; // Keep permit alive
-                
+                let _video_permit = video_permit; // Keep video permit alive if applicable
+
                 // Add timeout to prevent individual files from hanging
                 // Use different timeouts based on file type
-                let timeout_duration = if FileManager::is_video(&file_path) {
+                let timeout_duration = if is_video {
                     std::time::Duration::from_secs(900) // 15 minutes for videos
                 } else {
                     std::time::Duration::from_secs(180) // 3 minutes for images
@@ -180,7 +189,7 @@ impl MediaOptimizer {
                     Ok(r) => r,
                     Err(_) => {
                         error!("File processing timed out: {}", file_path.display());
-                        
+
                         // If we have an output directory, copy the original file
                         if let Some(ref _output_dir) = task_optimizer.config.output_path {
                             if let Ok(expected_output) = task_optimizer.get_expected_output_path(&file_path) {
@@ -194,31 +203,31 @@ impl MediaOptimizer {
                                 }
                             }
                         }
-                        
+
                         Err(anyhow::anyhow!("Processing timeout"))
                     }
                 };
-                
+
                 let message = match &result {
                     Ok(Some(processed)) => {
-                        format!("✅ {}: {:.1}% saved", 
+                        format!("[OK] {}: {:.1}% saved", 
                                file_path.file_name().unwrap_or_default().to_string_lossy(),
                                processed.reduction_percent)
                     }
                     Ok(None) => {
-                        format!("⏩ {}: skipped", 
+                        format!("[SKIP] {}: skipped", 
                                file_path.file_name().unwrap_or_default().to_string_lossy())
                     }
                     Err(_) => {
-                        format!("❌ {}: error", 
+                        format!("[ERROR] {}: error", 
                                file_path.file_name().unwrap_or_default().to_string_lossy())
                     }
                 };
-                
+
                 progress_clone.update(&message);
                 result
             });
-            
+
             tasks.push(task);
         }
         
@@ -323,11 +332,11 @@ impl TaskOptimizer {
             // Use EXACTLY the same logic as ImageProcessor::get_output_path
             let relative_path = match input_path.strip_prefix(&canonical_base) {
                 Ok(rel) => {
-                    debug!("✅ Strip prefix successful: {}", rel.display());
+                    debug!("[OK] Strip prefix successful: {}", rel.display());
                     rel.parent().unwrap_or(Path::new(""))
                 }
                 Err(e) => {
-                    debug!("❌ Strip prefix failed: {} - fallback to parent", e);
+                    debug!("[ERROR] Strip prefix failed: {} - fallback to parent", e);
                     input_path.parent().unwrap_or(Path::new(""))
                 }
             };
@@ -368,11 +377,11 @@ impl TaskOptimizer {
             let expected_output_path = self.get_expected_output_path(&file_path)?;
             debug!("Checking if output exists: {} -> {}", file_path.display(), expected_output_path.display());
             if expected_output_path.exists() {
-                debug!("✅ Skipping file, output already exists: {} -> {}", 
+                debug!("[OK] Skipping file, output already exists: {} -> {}", 
                        file_path.display(), expected_output_path.display());
                 return Ok(None);
             } else {
-                debug!("❌ Output does not exist, will process: {}", expected_output_path.display());
+                debug!("[PROCESS] Output does not exist, will process: {}", expected_output_path.display());
             }
         }
         
