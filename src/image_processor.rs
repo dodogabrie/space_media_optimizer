@@ -139,7 +139,11 @@ impl ImageProcessor {
             self.optimize_webp(&img, &temp_path).await?;
         } else {
             // Apply optimization based on original format
-            match input_path.extension().and_then(|s| s.to_str()) {
+            let ext = input_path.extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_lowercase());
+            
+            match ext.as_deref() {
                 Some("jpg") | Some("jpeg") => {
                     self.optimize_jpeg(&img, &temp_path).await?;
                 }

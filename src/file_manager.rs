@@ -80,9 +80,9 @@ impl FileManager {
     /// Check if a file format is supported
     pub fn is_supported_format(path: &Path) -> bool {
         if let Some(ext) = path.extension() {
-            let ext_lower = ext.to_string_lossy().to_lowercase();
+            let ext_str = ext.to_string_lossy();
             matches!(
-                ext_lower.as_str(),
+                ext_str.to_lowercase().as_str(),
                 "jpg" | "jpeg" | "png" | "webp" | "mp4" | "mov" | "avi" | "mkv" | "webm"
             )
         } else {
@@ -93,8 +93,8 @@ impl FileManager {
     /// Check if a file is an image
     pub fn is_image(path: &Path) -> bool {
         if let Some(ext) = path.extension() {
-            let ext_lower = ext.to_string_lossy().to_lowercase();
-            matches!(ext_lower.as_str(), "jpg" | "jpeg" | "png" | "webp")
+            let ext_str = ext.to_string_lossy();
+            matches!(ext_str.to_lowercase().as_str(), "jpg" | "jpeg" | "png" | "webp")
         } else {
             false
         }
@@ -103,8 +103,8 @@ impl FileManager {
     /// Check if a file is a video
     pub fn is_video(path: &Path) -> bool {
         if let Some(ext) = path.extension() {
-            let ext_lower = ext.to_string_lossy().to_lowercase();
-            matches!(ext_lower.as_str(), "mp4" | "mov" | "avi" | "mkv" | "webm")
+            let ext_str = ext.to_string_lossy();
+            matches!(ext_str.to_lowercase().as_str(), "mp4" | "mov" | "avi" | "mkv" | "webm")
         } else {
             false
         }
