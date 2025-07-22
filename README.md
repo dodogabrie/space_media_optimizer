@@ -1,16 +1,16 @@
 # Space Media Optimizer
 
-Un ottimizzatore di media efficiente scritto in Rust che riduce le dimensioni di immagini e video mantenendo la qualità, con gestione intelligente dello stato per evitare la rielaborazione.
+Un ottimizzatore di file multimediali in Rust che riduce le dimensioni di immagini e video.
 
 ## Caratteristiche
 
-- 🚀 **Performance elevate**: Elaborazione parallela con controllo della concorrenza
-- 🧠 **Gestione intelligente dello stato**: Evita la rielaborazione di file già ottimizzati
-- 🖼️ **Supporto immagini**: JPEG, PNG, WebP con preservazione metadata EXIF
-- 🎬 **Supporto video**: MP4, MOV, AVI, MKV, WebM con compressione H.264
-- 📊 **Progress tracking**: Barre di progresso e statistiche dettagliate
-- 🔒 **Sicurezza**: Backup automatici e validazione dell'input
-- ⚙️ **Configurabile**: Parametri di qualità e soglie personalizzabili
+-  **Performance elevate**: Elaborazione parallela con controllo della concorrenza
+-  **Gestione degli stati dei files**: Evita la rielaborazione di file già ottimizzati
+- ️ **Supporto immagini**: JPEG, PNG, WebP con preservazione metadati EXIF
+-  **Supporto video**: MP4, MOV, AVI, MKV, WebM con compressione H.264
+-  **Progress tracking**: Barre di progresso e statistiche dettagliate
+-  **Sicurezza**: Backup automatici e validazione dell'input
+-  **Configurabile**: Parametri e soglie personalizzabili
 
 ## Struttura del Progetto
 
@@ -98,20 +98,20 @@ cargo build --release
 
 ### Comando base
 ```bash
-./target/release/media-optimizer /path/to/media/directory
+./quick-start.sh /path/to/media/directory
 ```
 
 ### Opzioni avanzate
 ```bash
-./target/release/media-optimizer \
+./quick-start.sh \
+  /path/to/media \
   --quality 85 \
   --crf 24 \
   --audio-bitrate 192k \
   --threshold 0.85 \
   --workers 8 \
   --dry-run \
-  --verbose \
-  /path/to/media
+  --verbose
 ```
 
 ### Parametri
@@ -170,7 +170,7 @@ cargo test config::tests
 - **I/O ottimizzato**: Operazioni asincrone con tokio
 - **State efficiente**: Hash-based tracking evita scan completi
 
-## Vantaggi rispetto allo script Bash
+## Altri punti forti di Rust
 
 1. **Type Safety**: Rust previene molti errori a compile-time
 2. **Gestione Errori**: Robusta con `Result<T, E>` e error propagation
@@ -179,42 +179,3 @@ cargo test config::tests
 5. **Cross-platform**: Funziona su Linux, macOS, Windows
 6. **Testing**: Framework di testing integrato
 7. **Dependencies**: Gestione dipendenze con Cargo
-
-## 🎯 Risultati Finali
-
-✅ **Compilazione completata**: Nessun warning o errore  
-✅ **Architettura modulare**: 8 moduli specializzati  
-✅ **Type safety**: Rust garantisce correttezza a compile-time  
-✅ **Performance**: Elaborazione parallela ottimizzata  
-✅ **Memory safety**: Zero memory leaks o race conditions  
-
-### Benchmark vs Script Bash Originale
-
-| Metrica | Script Bash | Rust Version | Miglioramento |
-|---------|-------------|--------------|---------------|
-| **Type Safety** | ❌ Runtime errors | ✅ Compile-time checks | 🔥 **Massimo** |
-| **Concorrenza** | ❌ Sequenziale | ✅ Parallelo (4-8 workers) | 🚀 **4-8x più veloce** |
-| **Memory Usage** | ⚠️ Variabile | ✅ Basso e costante | 💚 **Ottimizzato** |
-| **Error Handling** | ⚠️ Fragile | ✅ Robusto | 🛡️ **Production-ready** |
-| **Manutenibilità** | ❌ Script monolitico | ✅ Modulare | 🏗️ **Eccellente** |
-| **Testing** | ❌ Manuale | ✅ Automatizzato | 🧪 **Professionale** |
-| **Cross-platform** | ⚠️ Linux/macOS | ✅ Windows/Linux/macOS | 🌍 **Universale** |
-
-### Dimensioni Binary
-
-```bash
-$ ls -lh target/release/media-optimizer
--rwxr-xr-x 1 user user 8.2M media-optimizer  # Singolo binary, zero dependencies runtime
-```
-
-## Contributi
-
-1. Fork del repository
-2. Crea un feature branch
-3. Aggiungi test per le nuove funzionalità
-4. Assicurati che tutti i test passino
-5. Crea una Pull Request
-
-## Licenza
-
-MIT License - vedi file LICENSE per dettagli.
