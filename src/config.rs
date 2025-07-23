@@ -38,7 +38,21 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Configurazione per le dimensioni dei thumbnails
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThumbnailSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl ThumbnailSize {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+}
 
 /// Configuration for media optimization
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +81,8 @@ pub struct Config {
     pub skip_video_compression: bool,
     /// Output progress and status as JSON for programmatic use
     pub json_output: bool,
+    /// Thumbnail configurations: name -> (width, height)
+    pub thumbnails: HashMap<String, ThumbnailSize>,
 }
 
 impl Default for Config {
@@ -84,6 +100,7 @@ impl Default for Config {
             keep_processed: false,
             skip_video_compression: false,
             json_output: false,
+            thumbnails: HashMap::new(),
         }
     }
 }

@@ -63,24 +63,24 @@ impl PathResolver {
         let canonical_output = output_dir.canonicalize()
             .map_err(|e| anyhow::anyhow!("Failed to canonicalize output dir {}: {}", output_dir.display(), e))?;
         
-        // debug!("Calculating path for: {}", input_path.display());
-        // debug!("Canonical base: {}", canonical_base.display());
-        // debug!("Canonical output: {}", canonical_output.display());
+        debug!("Calculating path for: {}", input_path.display());
+        debug!("Canonical base: {}", canonical_base.display());
+        debug!("Canonical output: {}", canonical_output.display());
         
         // Calcola path relativo
         let relative_path = match input_path.strip_prefix(&canonical_base) {
             Ok(rel) => {
-                // debug!("[OK] Strip prefix successful: {}", rel.display());
+                debug!("[OK] Strip prefix successful: {}", rel.display());
                 rel.parent().unwrap_or(Path::new(""))
             }
             Err(e) => {
-                // debug!("[ERROR] Strip prefix failed: {} - fallback to parent", e);
+                debug!("[ERROR] Strip prefix failed: {} - fallback to parent", e);
                 input_path.parent().unwrap_or(Path::new(""))
             }
         };
         
         let result = canonical_output.join(relative_path).join(filename);
-        // debug!("Resolved output path: {} -> {}", input_path.display(), result.display());
+        debug!("Resolved output path: {} -> {}", input_path.display(), result.display());
         
         Ok(result)
     }

@@ -10,14 +10,15 @@ use crate::{
     json_output::{JsonConfig, JsonMessage, HistoricalStats},
     optimizer::{progress_tracker::ProgressTracker, task_optimizer::TaskOptimizer},
     progress::OptimizationStats,
-    state::StateManager,
+    resize::{ImageResizer, ResizeAlgorithm, ResizeMode},
+    state::{StateManager, ProcessedFile},
     video_processor::VideoProcessor,
 };
 use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// Orchestratore principale ottimizzato
 pub struct MediaOptimizer {
@@ -60,6 +61,13 @@ impl MediaOptimizer {
         
         // Processa file con concorrenza controllata
         let progress_tracker = ProgressTracker::new(files.len());
+        
+        // STRATEGIA MIGLIORATA: Crea thumbnails dalle originali PRIMA dell'ottimizzazione
+        if !self.config.thumbnails.is_empty() && self.config.output_path.is_some() {
+            info!("🖼️ Creating thumbnails from original images (before optimization)...");
+            self.create_thumbnails_from_originals(&files).await?;
+        }
+        
         let stats = self.process_files_concurrently(files, progress_tracker.clone()).await?;
         
         // Finalizza e stampa statistiche
@@ -116,6 +124,14 @@ impl MediaOptimizer {
             info!("Video mode: Compress videos (CRF: {})", self.config.video_crf);
         }
         
+        // Log thumbnail configuration if enabled
+        if !self.config.thumbnails.is_empty() {
+            info!("Thumbnails: {} sizes configured", self.config.thumbnails.len());
+            for (name, size) in &self.config.thumbnails {
+                info!("  • {} - {}x{}", name, size.width, size.height);
+            }
+        }
+        
         info!("Found {} media files to process", files.len());
     }
     
@@ -143,7 +159,7 @@ impl MediaOptimizer {
     ) -> Result<OptimizationStats> {
         let semaphore = Arc::new(Semaphore::new(self.config.workers));
         let video_semaphore = Arc::new(Semaphore::new(1)); // Un video alla volta
-        let mut tasks = Vec::new();
+        let mut tasks: Vec<tokio::task::JoinHandle<Result<Option<ProcessedFile>, anyhow::Error>>> = Vec::new();
         let mut stats = OptimizationStats::new();
 
         for (index, file_path) in files.iter().enumerate() {
@@ -234,7 +250,7 @@ impl MediaOptimizer {
                 if let Err(e) = std::fs::copy(file_path, &expected_output) {
                     error!("Failed to copy original file after timeout: {}", e);
                 } else {
-                    // debug!("Copied original file to output after timeout: {}", expected_output.display());
+                    debug!("Copied original file to output after timeout: {}", expected_output.display());
                 }
             }
         }
@@ -290,5 +306,247 @@ impl MediaOptimizer {
         }
         
         Ok(())
+    }
+    
+    /// Crea thumbnails per tutte le immagini elaborate
+    async fn create_thumbnails_for_all_images(&self) -> Result<()> {
+        if self.config.thumbnails.is_empty() || self.config.output_path.is_none() {
+            return Ok(());
+        }
+
+        info!("🖼️ Creating thumbnails for processed images...");
+        
+        let output_dir = self.config.output_path.as_ref().unwrap();
+        
+        // Trova solo le immagini nella directory principale di output (non nelle sottocartelle thumbnail)
+        let output_images = FileManager::find_media_files(output_dir)?
+            .into_iter()
+            .filter(|path| {
+                // Verifica che sia supportato per il resize
+                if !ImageResizer::is_supported_for_resize(path) {
+                    return false;
+                }
+                
+                // Verifica che NON sia in una cartella di thumbnails
+                // Controlla se il path contiene "thumbnails" in qualsiasi parte del percorso relativo
+                if let Ok(rel_path) = path.strip_prefix(output_dir) {
+                    let path_str = rel_path.to_string_lossy();
+                    // Esclude qualsiasi file che abbia "thumbnails" nel path
+                    if path_str.contains("thumbnails") {
+                        debug!("Skipping thumbnail file for input: {}", path.display());
+                        return false;
+                    }
+                }
+                
+                true
+            })
+            .collect::<Vec<_>>();
+
+        if output_images.is_empty() {
+            info!("No images found for thumbnail creation");
+            return Ok(());
+        }
+
+        info!("Found {} images for thumbnail creation", output_images.len());
+
+        // Crea il resizer con qualità molto alta per minimizzare degrado da doppia compressione
+        let resizer = ImageResizer::new(
+            self.config.clone(),
+            ResizeAlgorithm::Lanczos,
+            ResizeMode::Fit,
+            Some(95), // Qualità molto alta per minimizzare degrado da doppia compressione JPEG
+            true, // Strip metadata for smaller thumbnails
+        )?;
+
+        let estimated_thumbnails = resizer.estimate_thumbnail_count(&output_images);
+        info!("Will create {} thumbnails total", estimated_thumbnails);
+
+        // Processo i thumbnails con concorrenza controllata
+        let semaphore = Arc::new(Semaphore::new(self.config.workers.min(4))); // Limite per i thumbnails
+        let mut tasks: Vec<tokio::task::JoinHandle<Result<usize, anyhow::Error>>> = Vec::new();
+
+        for image_path in output_images {
+            let permit = semaphore.clone().acquire_owned().await?;
+            let mut resizer_clone = ImageResizer::new(
+                self.config.clone(),
+                ResizeAlgorithm::Lanczos,
+                ResizeMode::Fit,
+                Some(95), // Qualità molto alta per minimizzare degrado da doppia compressione JPEG
+                true, // Strip metadata for smaller thumbnails
+            )?;
+            let output_base = output_dir.clone();
+
+            let task = tokio::spawn(async move {
+                let _permit = permit;
+                
+                match resizer_clone.create_thumbnails(&image_path, &output_base).await {
+                    Ok(thumbnail_paths) => {
+                        if !thumbnail_paths.is_empty() {
+                            info!("Created {} thumbnails for {}", 
+                                  thumbnail_paths.len(),
+                                  image_path.file_name().unwrap_or_default().to_string_lossy());
+                        }
+                        Ok(thumbnail_paths.len())
+                    }
+                    Err(e) => {
+                        error!("Failed to create thumbnails for {}: {}", image_path.display(), e);
+                        Ok(0)
+                    }
+                }
+            });
+
+            tasks.push(task);
+        }
+
+        // Aspetta tutti i task
+        let mut total_created = 0;
+        for task in tasks {
+            match task.await? {
+                Ok(count) => total_created += count,
+                Err(_) => {} // Errore già loggato
+            }
+        }
+
+        info!("✅ Thumbnail creation complete: {} thumbnails created", total_created);
+        Ok(())
+    }
+    
+    /// Crea thumbnails dalle immagini originali (prima dell'ottimizzazione)
+    /// Questa strategia preserva la massima qualità dei thumbnails
+    async fn create_thumbnails_from_originals(&self, files: &[PathBuf]) -> Result<()> {
+        if self.config.thumbnails.is_empty() || self.config.output_path.is_none() {
+            return Ok(());
+        }
+
+        let output_dir = self.config.output_path.as_ref().unwrap();
+        
+        // Calcola la directory base comune dai file originali
+        let base_dir = if let Some(first_file) = files.first() {
+            // Usa la directory del primo file come base, oppure trova il prefisso comune
+            self.find_common_base_dir(files).unwrap_or_else(|| {
+                first_file.parent().unwrap_or(Path::new(".")).to_path_buf()
+            })
+        } else {
+            return Ok(());
+        };
+        
+        // Filtra solo le immagini supportate per il resize
+        let image_files: Vec<_> = files
+            .iter()
+            .filter(|path| ImageResizer::is_supported_for_resize(path))
+            .collect();
+
+        if image_files.is_empty() {
+            info!("No images found for thumbnail creation from originals");
+            return Ok(());
+        }
+
+        info!("Found {} original images for thumbnail creation", image_files.len());
+
+        // Crea il resizer con qualità massima (dalle originali)
+        let resizer = ImageResizer::new(
+            self.config.clone(),
+            ResizeAlgorithm::Lanczos, // Migliore qualità per le originali
+            ResizeMode::Fit,
+            Some(95), // Qualità alta per preservare dettagli dalle originali
+            true, // Strip metadata for smaller thumbnails
+        )?;
+
+        let estimated_thumbnails = resizer.estimate_thumbnail_count(&image_files.iter().map(|p| (*p).clone()).collect::<Vec<_>>());
+        info!("Will create {} thumbnails total from originals", estimated_thumbnails);
+
+        // Processo i thumbnails con concorrenza controllata
+        let semaphore = Arc::new(Semaphore::new(self.config.workers.min(4))); // Limite per i thumbnails
+        let mut tasks: Vec<tokio::task::JoinHandle<Result<usize, anyhow::Error>>> = Vec::new();
+
+        for image_path in image_files {
+            let permit = semaphore.clone().acquire_owned().await?;
+            let mut resizer_clone = ImageResizer::new(
+                self.config.clone(),
+                ResizeAlgorithm::Lanczos, // Migliore qualità per le originali
+                ResizeMode::Fit,
+                Some(95), // Qualità alta per preservare dettagli dalle originali
+                true, // Strip metadata for smaller thumbnails
+            )?;
+            let output_base = output_dir.clone();
+            let media_base = base_dir.clone();
+            let image_path = image_path.clone();
+
+            let task = tokio::spawn(async move {
+                let _permit = permit;
+                
+                match resizer_clone.create_thumbnails(&image_path, &media_base).await {
+                    Ok(thumbnail_paths) => {
+                        if !thumbnail_paths.is_empty() {
+                            info!("Created {} thumbnails from original {}", 
+                                  thumbnail_paths.len(),
+                                  image_path.file_name().unwrap_or_default().to_string_lossy());
+                        }
+                        Ok(thumbnail_paths.len())
+                    }
+                    Err(e) => {
+                        error!("Failed to create thumbnails from original {}: {}", image_path.display(), e);
+                        Ok(0)
+                    }
+                }
+            });
+
+            tasks.push(task);
+        }
+
+        // Aspetta tutti i task
+        let mut total_created = 0;
+        for task in tasks {
+            match task.await {
+                Ok(Ok(count)) => total_created += count,
+                Ok(Err(e)) => error!("Thumbnail creation task failed: {}", e),
+                Err(e) => error!("Thumbnail creation task panicked: {}", e),
+            }
+        }
+
+        if total_created > 0 {
+            info!("✅ Created {} thumbnails from original images", total_created);
+        } else {
+            warn!("No thumbnails were created from original images");
+        }
+        
+        Ok(())
+    }
+
+    /// Trova la directory base comune per un set di file
+    fn find_common_base_dir(&self, files: &[PathBuf]) -> Option<PathBuf> {
+        if files.is_empty() {
+            return None;
+        }
+
+        // Inizia con la directory del primo file
+        let mut common_path = files[0].parent()?.to_path_buf();
+
+        // Per ogni file successivo, trova il prefisso comune
+        for file in files.iter().skip(1) {
+            if let Some(file_parent) = file.parent() {
+                // Trova il prefisso comune tra common_path e file_parent
+                let mut new_common = PathBuf::new();
+                let common_components: Vec<_> = common_path.components().collect();
+                let file_components: Vec<_> = file_parent.components().collect();
+
+                for (c1, c2) in common_components.iter().zip(file_components.iter()) {
+                    if c1 == c2 {
+                        new_common.push(c1);
+                    } else {
+                        break;
+                    }
+                }
+
+                common_path = new_common;
+                
+                // Se non c'è più un prefisso comune, usa la root
+                if common_path.as_os_str().is_empty() {
+                    return Some(PathBuf::from("."));
+                }
+            }
+        }
+
+        Some(common_path)
     }
 }

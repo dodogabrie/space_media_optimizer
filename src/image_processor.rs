@@ -406,7 +406,7 @@ impl ImageProcessor {
         let tools: &[(&str, fn(&str, &str, &Config) -> Vec<String>)] = &[
             ("oxipng", |input, output, _config| to_string_vec([
                 "-o", "6",
-                "--strip", "safe",
+                "--strip", "all",
                 "--out", output,
                 input,
             ])),
@@ -774,16 +774,16 @@ impl ImageProcessor {
                     return Err(anyhow::anyhow!("{} optimization cancelled by user", format_name));
                 }
 
-                // debug!("Attempting {} optimization with {}", format_name, tool_name);
+                debug!("Attempting {} optimization with {}", format_name, tool_name);
                 
                 // Get the resolved tool path (bundled or system)
                 let tool_path = platform.get_tool_path(tool_name)
                     .unwrap_or_else(|| PathBuf::from(tool_name));
                 
-                // debug!("Using tool path: {:?}", tool_path);
+                debug!("Using tool path: {:?}", tool_path);
                 
                 let args = args_builder(input, output, &self.config);
-                // debug!("Command arguments: {:?}", args);
+                debug!("Command arguments: {:?}", args);
                 
                 let success = Command::new(&tool_path)
                     .args(&args)
@@ -792,7 +792,7 @@ impl ImageProcessor {
                     .success();
 
                 if success {
-                    // debug!("{} optimized successfully with {}", format_name, tool_name);
+                    debug!("{} optimized successfully with {}", format_name, tool_name);
                     return Ok(PathBuf::from(output));
                 } else {
                     warn!("{} optimization failed, trying next tool", tool_name);

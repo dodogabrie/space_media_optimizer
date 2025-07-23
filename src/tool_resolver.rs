@@ -34,15 +34,15 @@ impl ToolPathResolver {
     /// Detect the bundled tools directory in Electron
     fn detect_bundled_tools_dir() -> Option<PathBuf> {
         let current_dir = env::current_dir().ok()?;
-        // debug!("Current directory: {:?}", current_dir);
+        debug!("Current directory: {:?}", current_dir);
         
         // Strategy 1: Look for tools directory by traversing up the directory tree
         let mut search_dir = current_dir.clone();
         for _ in 0..10 { // Max 10 levels up
             let tools_path = search_dir.join("src").join("tools");
-            // debug!("Checking tools path: {:?}", tools_path);
+            debug!("Checking tools path: {:?}", tools_path);
             if tools_path.exists() {
-                // debug!("Found tools directory by traversing up: {:?}", tools_path);
+                debug!("Found tools directory by traversing up: {:?}", tools_path);
                 return Some(tools_path);
             }
             
@@ -57,18 +57,18 @@ impl ToolPathResolver {
         // Strategy 2: Check if we can find it via environment variable
         if let Ok(tools_dir) = env::var("OPTIMIZATION_TOOLS_DIR") {
             let tools_path = PathBuf::from(tools_dir);
-            // debug!("Checking environment variable path: {:?}", tools_path);
+            debug!("Checking environment variable path: {:?}", tools_path);
             if tools_path.exists() {
-                // debug!("Found tools directory via environment variable: {:?}", tools_path);
+                debug!("Found tools directory via environment variable: {:?}", tools_path);
                 return Some(tools_path);
             }
         }
         
         // Strategy 3: Try to detect Electron app directory structure for production
         if let Ok(exe_path) = env::current_exe() {
-            // debug!("Executable path: {:?}", exe_path);
+            debug!("Executable path: {:?}", exe_path);
             if let Some(app_dir) = exe_path.parent() {
-                // debug!("App directory: {:?}", app_dir);
+                debug!("App directory: {:?}", app_dir);
                 
                 // Common Electron app structures
                 let possible_paths = [
@@ -79,9 +79,9 @@ impl ToolPathResolver {
                 ];
 
                 for path in &possible_paths {
-                    // debug!("Checking production path: {:?}", path);
+                    debug!("Checking production path: {:?}", path);
                     if path.exists() {
-                        // debug!("Found bundled tools directory: {:?}", path);
+                        debug!("Found bundled tools directory: {:?}", path);
                         return Some(path.clone());
                     }
                 }
@@ -94,26 +94,26 @@ impl ToolPathResolver {
 
     /// Resolve the path to a specific tool
     pub fn resolve_tool(&self, tool_name: &str) -> Option<PathBuf> {
-        // debug!("Resolving tool: {}", tool_name);
-        // debug!("Tools directory: {:?}", self.tools_dir);
+        debug!("Resolving tool: {}", tool_name);
+        debug!("Tools directory: {:?}", self.tools_dir);
         
         // Try bundled tools first (for Electron distribution)
         if let Some(ref tools_dir) = self.tools_dir {
             let bundled_path = self.get_bundled_tool_path(tools_dir, tool_name);
-            // debug!("Checking bundled path: {:?}", bundled_path);
+            debug!("Checking bundled path: {:?}", bundled_path);
             if bundled_path.exists() {
-                // debug!("Using bundled tool: {} -> {:?}", tool_name, bundled_path);
+                debug!("Using bundled tool: {} -> {:?}", tool_name, bundled_path);
                 return Some(bundled_path);
             } else {
-                // debug!("Bundled path does not exist: {:?}", bundled_path);
+                debug!("Bundled path does not exist: {:?}", bundled_path);
             }
         } else {
-            // debug!("No tools directory configured");
+            debug!("No tools directory configured");
         }
 
         // Fall back to system PATH
         if let Some(system_path) = self.find_in_system_path(tool_name) {
-            // debug!("Using system tool: {} -> {:?}", tool_name, system_path);
+            debug!("Using system tool: {} -> {:?}", tool_name, system_path);
             return Some(system_path);
         }
 

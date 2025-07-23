@@ -32,6 +32,7 @@ pub mod state;
 pub mod optimizer;
 pub mod image_processor;
 pub mod video_processor;
+pub mod resize;
 pub mod file_manager;
 pub mod platform;
 pub mod progress;
@@ -39,8 +40,9 @@ pub mod json_output;
 pub mod utils;
 pub mod tool_resolver;
 
-pub use config::Config;
+pub use config::{Config, ThumbnailSize};
 pub use error::OptimizeError;
 pub use state::{StateFile, ProcessedFile};
 pub use optimizer::MediaOptimizer;
 pub use json_output::{JsonMessage, JsonConfig, HistoricalStats};
+pub use resize::{ImageResizer, ResizeAlgorithm, ResizeMode};

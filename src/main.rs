@@ -22,10 +22,32 @@
 
 use anyhow::Result;
 use clap::Parser;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::info;
 
-use space_media_optimizer::{Config, MediaOptimizer};
+use space_media_optimizer::{
+    config::{Config, ThumbnailSize},
+    optimizer::media_optimizer::MediaOptimizer,
+};
+
+/// Parser for thumbnail configuration from JSON string
+fn parse_thumbnails(s: &str) -> Result<HashMap<String, ThumbnailSize>, String> {
+    let parsed: Result<HashMap<String, [u32; 2]>, _> = serde_json::from_str(s);
+    match parsed {
+        Ok(map) => {
+            let mut thumbnails = HashMap::new();
+            for (name, dimensions) in map {
+                if dimensions.len() != 2 {
+                    return Err(format!("Invalid dimensions for '{}': expected [width, height]", name));
+                }
+                thumbnails.insert(name, ThumbnailSize::new(dimensions[0], dimensions[1]));
+            }
+            Ok(thumbnails)
+        }
+        Err(e) => Err(format!("Invalid JSON format: {}", e)),
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "media-optimizer")]
@@ -85,6 +107,10 @@ struct Args {
     /// Output progress and status as JSON for programmatic use
     #[arg(long)]
     json_output: bool,
+    
+    /// Create thumbnails with specified sizes (JSON format: {"gallery": [800, 600], "mini": [150, 150]})
+    #[arg(long, value_parser = parse_thumbnails)]
+    thumbnails: Option<HashMap<String, ThumbnailSize>>,
 }
 
 #[tokio::main]
@@ -131,6 +157,7 @@ async fn main() -> Result<()> {
         keep_processed: args.keep_processed,
         skip_video_compression: args.skip_video_compression,
         json_output: args.json_output,
+        thumbnails: args.thumbnails.unwrap_or_default(),
     };
     
     // Create optimizer with tool detection
