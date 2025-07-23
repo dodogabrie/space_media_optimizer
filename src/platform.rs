@@ -1,15 +1,18 @@
 //! # Platform-specific utilities
 //!
 //! Questo modulo centralizza tutta la logica per la gestione cross-platform
-//! dei comandi e delle dipendenze esterne.
+//! dei comandi e delle dipendenze esterne. Supporta tool bundled in Electron
+//! e tool di sistema.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
+use crate::tool_resolver::ToolPathResolver;
 
-/// Platform-specific command manager
+/// Platform-specific command manager with tool resolution
 pub struct PlatformCommands {
     commands: HashMap<&'static str, &'static str>,
     which_command: &'static str,
+    tool_resolver: ToolPathResolver,
 }
 
 impl PlatformCommands {
@@ -28,6 +31,12 @@ impl PlatformCommands {
             commands.insert("cwebp", "cwebp.exe");
             commands.insert("ffmpeg", "ffmpeg.exe");
             commands.insert("ffprobe", "ffprobe.exe");
+            commands.insert("mozjpeg", "mozjpeg.exe");
+            commands.insert("jpegoptim", "jpegoptim.exe");
+            commands.insert("jpegtran", "jpegtran.exe");
+            commands.insert("oxipng", "oxipng.exe");
+            commands.insert("optipng", "optipng.exe");
+            commands.insert("pngcrush", "pngcrush.exe");
             (commands, "where")
         } else {
             // Unix-like systems (Linux, macOS)
@@ -36,12 +45,19 @@ impl PlatformCommands {
             commands.insert("cwebp", "cwebp");
             commands.insert("ffmpeg", "ffmpeg");
             commands.insert("ffprobe", "ffprobe");
+            commands.insert("mozjpeg", "mozjpeg");
+            commands.insert("jpegoptim", "jpegoptim");
+            commands.insert("jpegtran", "jpegtran");
+            commands.insert("oxipng", "oxipng");
+            commands.insert("optipng", "optipng");
+            commands.insert("pngcrush", "pngcrush");
             (commands, "which")
         };
-        
+
         Self {
             commands,
             which_command,
+            tool_resolver: ToolPathResolver::new(),
         }
     }
     
@@ -55,18 +71,39 @@ impl PlatformCommands {
         self.which_command
     }
     
-    /// Check if a command is available on the system
+    /// Check if a command is available on the system or bundled
     pub async fn is_command_available(&self, base_name: &str) -> bool {
+        // First try the tool resolver (bundled tools + system PATH)
+        if self.tool_resolver.is_tool_available(base_name) {
+            return true;
+        }
+
+        // Fallback to traditional which/where command
         let command_name = self.get_command(base_name);
         
-        std::process::Command::new(self.which_command)
+        // Use tokio::process::Command for async execution
+        let result = tokio::process::Command::new(self.which_command)
             .arg(command_name)
             .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false)
+            .await;
+            
+        match result {
+            Ok(output) => output.status.success(),
+            Err(_) => false,
+        }
+    }
+
+    /// Get the resolved path to a tool (bundled or system)
+    pub fn get_tool_path(&self, base_name: &str) -> Option<std::path::PathBuf> {
+        self.tool_resolver.resolve_tool(base_name)
+    }
+
+    /// Get a report of all available tools
+    pub fn get_tools_report(&self) -> String {
+        self.tool_resolver.get_tools_report()
     }
     
-    /// Get system information for debugging
+    /// Get system information for // debugging
     pub fn system_info() -> SystemInfo {
         SystemInfo {
             os: std::env::consts::OS,

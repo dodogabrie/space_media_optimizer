@@ -65,6 +65,8 @@ pub struct Config {
     pub keep_processed: bool,
     /// Skip video compression (just copy videos to output)
     pub skip_video_compression: bool,
+    /// Output progress and status as JSON for programmatic use
+    pub json_output: bool,
 }
 
 impl Default for Config {
@@ -81,6 +83,7 @@ impl Default for Config {
             webp_quality: 80,
             keep_processed: false,
             skip_video_compression: false,
+            json_output: false,
         }
     }
 }

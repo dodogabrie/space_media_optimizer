@@ -81,6 +81,10 @@ struct Args {
     /// Verbose logging
     #[arg(short, long)]
     verbose: bool,
+    
+    /// Output progress and status as JSON for programmatic use
+    #[arg(long)]
+    json_output: bool,
 }
 
 #[tokio::main]
@@ -126,9 +130,18 @@ async fn main() -> Result<()> {
         webp_quality: args.webp_quality,
         keep_processed: args.keep_processed,
         skip_video_compression: args.skip_video_compression,
+        json_output: args.json_output,
     };
     
+    // Create optimizer with tool detection
     let mut optimizer = MediaOptimizer::new(&args.media_directory, config).await?;
+    
+    // Print tool status if verbose
+    if args.verbose {
+        // This requires access to the image processor, we'll add this functionality
+        info!("🚀 Starting tool-based media optimization...");
+    }
+    
     optimizer.run(&args.media_directory).await?;
     
     Ok(())

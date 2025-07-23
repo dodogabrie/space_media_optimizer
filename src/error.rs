@@ -20,7 +20,7 @@
 //! 
 //! ## Vantaggi:
 //! - Errori tipizzati per handling specifico
-//! - Messaggi chiari per debugging
+//! - Messaggi chiari per // debugging
 //! - Automatic conversion da errori standard
 //! - Integration con `anyhow` per error propagation
 //! 

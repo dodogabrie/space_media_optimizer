@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }
+futures = "0.3"
 
 # CLI
 clap = { version = "4.0", features = ["derive"] }
@@ -25,9 +26,9 @@ thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Image processing
-image = { version = "0.24", features = ["jpeg", "png", "webp"] }
-webp = "0.2"
+# Image processing - Only basic format detection, no in-memory processing
+# All actual optimization is done by external tools for better performance
+image = { version = "0.24", features = ["jpeg", "png", "webp"], default-features = false }
 
 # File operations
 walkdir = "2.0"
@@ -53,3 +54,4 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+opt-level = 3
