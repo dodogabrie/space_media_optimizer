@@ -282,9 +282,20 @@ impl ImageProcessor {
             return Err(anyhow::anyhow!("Image optimization cancelled by user"));
         }
 
+        // Pre-resize large images to 2.5K if needed
+        let actual_input_path = if self.is_larger_than_4k(input_path).await.unwrap_or(false) {
+            let temp_resized_path = self.create_temp_resized_path(input_path)?;
+            self.pre_resize_to_4k(input_path, &temp_resized_path).await?;
+            info!("Pre-resized large image {} to 2.5K at {}", 
+                  input_path.display(), temp_resized_path.display());
+            temp_resized_path
+        } else {
+            input_path.to_path_buf()
+        };
+
         // Convert input path to string for tool commands
-        let input_str = input_path.to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid input path: {:?}", input_path))?;
+        let input_str = actual_input_path.to_str()
+            .ok_or_else(|| anyhow::anyhow!("Invalid input path: {:?}", actual_input_path))?;
 
         // Calculate the output path based on configuration and input structure
         let output_path = self.get_output_path(input_path, input_base_dir);
@@ -302,12 +313,12 @@ impl ImageProcessor {
         }
 
         // Extract and normalize file extension for format detection
-        let ext = input_path.extension()
+        let ext = actual_input_path.extension()
             .and_then(|s| s.to_str())
             .map(|s| s.to_lowercase());
 
         // Route to appropriate optimization method based on format
-        match ext.as_deref() {
+        let result = match ext.as_deref() {
             Some("jpg") | Some("jpeg") => {
                 if self.config.convert_to_webp {
                     self.convert_to_webp(input_str, output_str).await
@@ -327,10 +338,21 @@ impl ImageProcessor {
             }
             _ => {
                 // Unsupported format - return error instead of copying
-                error!("Unsupported format for optimization: {:?}", input_path);
-                Err(anyhow::anyhow!("Unsupported image format: {:?}. Only JPEG, PNG, and WebP are supported.", input_path))
+                error!("Unsupported format for optimization: {:?}", actual_input_path);
+                Err(anyhow::anyhow!("Unsupported image format: {:?}. Only JPEG, PNG, and WebP are supported.", actual_input_path))
+            }
+        };
+
+        // Clean up temporary pre-resized file if we created one
+        if actual_input_path != input_path {
+            if let Err(e) = tokio::fs::remove_file(&actual_input_path).await {
+                warn!("Failed to cleanup temporary resized file {}: {}", actual_input_path.display(), e);
+            } else {
+                debug!("Cleaned up temporary pre-resized file: {}", actual_input_path.display());
             }
         }
+
+        result
     }
 
     /// Optimizes JPEG images using the best available tool in order of preference.
@@ -785,17 +807,19 @@ impl ImageProcessor {
                 let args = args_builder(input, output, &self.config);
                 debug!("Command arguments: {:?}", args);
                 
+                let start_time = std::time::Instant::now();
                 let success = Command::new(&tool_path)
                     .args(&args)
                     .status()
                     .await?
                     .success();
+                let elapsed = start_time.elapsed();
 
                 if success {
-                    debug!("{} optimized successfully with {}", format_name, tool_name);
+                    debug!("{} optimized successfully with {} in {:?}", format_name, tool_name, elapsed);
                     return Ok(PathBuf::from(output));
                 } else {
-                    warn!("{} optimization failed, trying next tool", tool_name);
+                    warn!("{} optimization failed with {} after {:?}, trying next tool", tool_name, format_name, elapsed);
                 }
             }
         }
@@ -834,16 +858,240 @@ impl ImageProcessor {
         args: &[String],
         output_path: &str,
     ) -> Result<bool> {
+        let start_time = std::time::Instant::now();
         let output_data = Command::new(tool_name)
             .args(args)
             .output()
             .await?;
+        let elapsed = start_time.elapsed();
 
         if output_data.status.success() {
             tokio::fs::write(output_path, output_data.stdout).await?;
+            debug!("{} completed successfully in {:?}", tool_name, elapsed);
             Ok(true)
         } else {
+            warn!("{} failed after {:?}", tool_name, elapsed);
             Ok(false)
         }
+    }
+
+    /// Gets image dimensions using ImageMagick identify command.
+    /// 
+    /// # Arguments
+    /// * `image_path` - Path to the image file
+    /// 
+    /// # Returns
+    /// * `Result<(u32, u32)>` - Width and height in pixels, or error if detection failed
+    /// 
+    /// # Example
+    /// ```rust
+    /// let (width, height) = processor.get_image_dimensions(&image_path).await?;
+    /// println!("Image is {}x{} pixels", width, height);
+    /// ```
+    pub async fn get_image_dimensions(&self, image_path: &Path) -> Result<(u32, u32)> {
+        let platform = PlatformCommands::instance();
+        
+        // Try ImageMagick 7.x first (magick identify)
+        if let Some(magick_path) = platform.get_tool_path("magick") {
+            if let Ok(output) = Command::new(magick_path)
+                .args(&["identify", "-format", "%w %h", &image_path.to_string_lossy()])
+                .output()
+                .await
+            {
+                if output.status.success() {
+                    let dimensions_str = String::from_utf8_lossy(&output.stdout);
+                    let parts: Vec<&str> = dimensions_str.trim().split_whitespace().collect();
+                    if parts.len() == 2 {
+                        if let (Ok(width), Ok(height)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                            debug!("Got dimensions {}x{} for {}", width, height, image_path.display());
+                            return Ok((width, height));
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Try ImageMagick 6.x (identify)
+        if let Some(identify_path) = platform.get_tool_path("identify") {
+            if let Ok(output) = Command::new(identify_path)
+                .args(&["-format", "%w %h", &image_path.to_string_lossy()])
+                .output()
+                .await
+            {
+                if output.status.success() {
+                    let dimensions_str = String::from_utf8_lossy(&output.stdout);
+                    let parts: Vec<&str> = dimensions_str.trim().split_whitespace().collect();
+                    if parts.len() == 2 {
+                        if let (Ok(width), Ok(height)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                            debug!("Got dimensions {}x{} for {}", width, height, image_path.display());
+                            return Ok((width, height));
+                        }
+                    }
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!(
+            "Unable to detect image dimensions for {}. ImageMagick tools (magick/identify) not available or failed.",
+            image_path.display()
+        ))
+    }
+
+    /// Checks if an image is larger than 2.5K resolution (2560x1440).
+    /// 
+    /// # Arguments
+    /// * `image_path` - Path to the image file
+    /// 
+    /// # Returns
+    /// * `Result<bool>` - True if image is larger than 2.5K, false otherwise
+    pub async fn is_larger_than_4k(&self, image_path: &Path) -> Result<bool> {
+        const MAX_2_5K_WIDTH: u32 = 2560;
+        const MAX_2_5K_HEIGHT: u32 = 1440;
+        
+        let (width, height) = self.get_image_dimensions(image_path).await?;
+        let is_larger = width > MAX_2_5K_WIDTH || height > MAX_2_5K_HEIGHT;
+        
+        if is_larger {
+            info!("Image {}x{} is larger than 2.5K ({}x{}): {}", 
+                  width, height, MAX_2_5K_WIDTH, MAX_2_5K_HEIGHT, image_path.display());
+        }
+        
+        Ok(is_larger)
+    }
+
+    /// Pre-resizes an image to 2.5K resolution if it's larger, using optimal settings for speed.
+    /// This should be called before optimization to avoid working with huge images.
+    /// 
+    /// # Arguments
+    /// * `input_path` - Path to the original image
+    /// * `temp_output_path` - Path where to save the resized image
+    /// 
+    /// # Returns
+    /// * `Result<()>` - Success or error
+    /// 
+    /// # Note
+    /// This function uses fast resize algorithms optimized for speed over quality,
+    /// since the image will be further optimized afterward.
+    pub async fn pre_resize_to_4k(&self, input_path: &Path, temp_output_path: &Path) -> Result<()> {
+        const MAX_2_5K_WIDTH: u32 = 2560;
+        const MAX_2_5K_HEIGHT: u32 = 1440;
+        
+        let platform = PlatformCommands::instance();
+        let input_str = input_path.to_string_lossy();
+        let output_str = temp_output_path.to_string_lossy();
+        
+        info!("Pre-resizing large image to 2.5K: {} -> {}", input_path.display(), temp_output_path.display());
+        
+        // Create parent directory if needed
+        if let Some(parent) = temp_output_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        
+        // Try tools in order of preference: magick, convert, vips
+        let tools = ["magick", "convert", "vips"];
+        
+        for tool_name in &tools {
+            if platform.is_command_available(tool_name).await {
+                let tool_path = platform.get_tool_path(tool_name)
+                    .unwrap_or_else(|| std::path::PathBuf::from(tool_name));
+                
+                let success = match *tool_name {
+                    "magick" | "convert" => {
+                        let resize_arg = format!("{}x{}>", MAX_2_5K_WIDTH, MAX_2_5K_HEIGHT); // > only shrinks, never enlarges
+                        let args = to_string_vec([
+                            &input_str,
+                            "-resize", &resize_arg,
+                            "-filter", "Lanczos", // Good quality and reasonable speed
+                            "-colorspace", "sRGB", // Ensure consistent color space
+                            "-quality", "95", // High quality for temp file (will be optimized later)
+                            "-strip", // Remove metadata to avoid issues
+                            "-limit", "memory", "512MB", // Reduced memory
+                            "-limit", "disk", "2GB", // Reduced disk
+                            &output_str
+                        ]);
+                        
+                        debug!("Running pre-resize with {}: {:?}", tool_name, args);
+                        
+                        // Start timing
+                        let start_time = std::time::Instant::now();
+                        info!("Starting pre-resize command...");
+                        
+                        // Spawn process with timeout
+                        let mut child = Command::new(&tool_path)
+                            .args(&args)
+                            .spawn()?;
+                        
+                        info!("Process spawned, waiting for completion...");
+                        
+                        let status = tokio::time::timeout(
+                            std::time::Duration::from_secs(120), // Aumentato a 2 minuti per file grandi
+                            child.wait()
+                        ).await
+                        .map_err(|_| anyhow::anyhow!("Pre-resize command timed out after 2 minutes"))?
+                        .map_err(|e| anyhow::anyhow!("Pre-resize command failed: {}", e))?;
+                        
+                        let elapsed = start_time.elapsed();
+                        info!("Pre-resize command completed in {:?}", elapsed);
+                        
+                        status.success()
+                    },
+                    "vips" => {
+                        let args = to_string_vec([
+                            "thumbnail",
+                            &input_str,
+                            &output_str,
+                            &MAX_2_5K_WIDTH.to_string(),
+                            "--height", &MAX_2_5K_HEIGHT.to_string(),
+                            "--kernel", "mitchell",
+                        ]);
+                        
+                        debug!("Running pre-resize with vips: {:?}", args);
+                        let status = Command::new(&tool_path)
+                            .args(&args)
+                            .status()
+                            .await?;
+                        status.success()
+                    },
+                    _ => false,
+                };
+                
+                if success {
+                    info!("Pre-resize to 2.5K completed successfully with {}", tool_name);
+                    return Ok(());
+                } else {
+                    warn!("{} pre-resize failed, trying next tool", tool_name);
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!(
+            "Unable to pre-resize image {}. No working tools (magick/convert/vips) found.",
+            input_path.display()
+        ))
+    }
+
+    /// Creates a temporary path for storing pre-resized images.
+    /// 
+    /// # Arguments
+    /// * `original_path` - Path to the original image
+    /// 
+    /// # Returns
+    /// * `Result<PathBuf>` - Path for the temporary resized image
+    fn create_temp_resized_path(&self, original_path: &Path) -> Result<PathBuf> {
+        let file_stem = original_path.file_stem()
+            .ok_or_else(|| anyhow::anyhow!("Invalid file stem: {}", original_path.display()))?;
+        let extension = original_path.extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("tmp");
+        
+        // Create temp path in system temp directory
+        let temp_dir = std::env::temp_dir();
+        let temp_filename = format!("{}_2_5k_temp.{}", file_stem.to_string_lossy(), extension);
+        let temp_path = temp_dir.join(temp_filename);
+        
+        debug!("Created temp path for pre-resize: {} -> {}", 
+               original_path.display(), temp_path.display());
+        
+        Ok(temp_path)
     }
 }

@@ -20,11 +20,169 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
+/// Classificazione dei file per dimensione per gestire la concorrenza
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FileSize {
+    Small,  // < 5MB
+    Medium, // 5MB - 20MB 
+    Large,  // > 20MB
+}
+
+impl FileSize {
+    /// Classifica un file in base alla sua dimensione
+    fn classify(size_bytes: u64) -> Self {
+        const MB_5: u64 = 5 * 1024 * 1024;
+        const MB_20: u64 = 20 * 1024 * 1024;
+        
+        if size_bytes < MB_5 {
+            Self::Small
+        } else if size_bytes < MB_20 {
+            Self::Medium
+        } else {
+            Self::Large
+        }
+    }
+    
+    /// Ottieni il numero massimo di worker per questa classe di file
+    fn max_concurrent(&self, total_workers: usize) -> usize {
+        match self {
+            Self::Small => total_workers,           // Tutti i worker disponibili
+            Self::Medium => (total_workers / 2).max(1), // Metà dei worker
+            Self::Large => 1,                       // Solo un worker per file grandi
+        }
+    }
+    
+    /// Descrizione per il logging
+    fn description(&self) -> &'static str {
+        match self {
+            Self::Small => "small (<5MB)",
+            Self::Medium => "medium (5-20MB)",
+            Self::Large => "large (>20MB)",
+        }
+    }
+}
+
+/// Gestione intelligente della concorrenza basata su dimensioni dei file
+struct ConcurrencyManager {
+    /// Semaforo per file piccoli (può usare tutti i worker)
+    small_semaphore: Arc<Semaphore>,
+    /// Semaforo per file medi (usa metà dei worker)
+    medium_semaphore: Arc<Semaphore>,
+    /// Semaforo per file grandi (solo 1 alla volta)
+    large_semaphore: Arc<Semaphore>,
+    /// Semaforo per video (sempre 1 alla volta)
+    video_semaphore: Arc<Semaphore>,
+    /// Semaforo globale per bloccare tutto quando un file grande è in elaborazione
+    global_large_block: Arc<Semaphore>,
+}
+
+impl ConcurrencyManager {
+    fn new(max_workers: usize) -> Self {
+        let small_workers = max_workers;
+        let medium_workers = (max_workers / 2).max(1);
+        
+        info!("🔧 Concurrency configuration:");
+        info!("  • Small files (<5MB): {} concurrent workers", small_workers);
+        info!("  • Medium files (5-20MB): {} concurrent workers", medium_workers);
+        info!("  • Large files (>20MB): 1 worker (blocks others)");
+        info!("  • Videos: 1 worker (always serial)");
+        
+        Self {
+            small_semaphore: Arc::new(Semaphore::new(small_workers)),
+            medium_semaphore: Arc::new(Semaphore::new(medium_workers)),
+            large_semaphore: Arc::new(Semaphore::new(1)),
+            video_semaphore: Arc::new(Semaphore::new(1)),
+            global_large_block: Arc::new(Semaphore::new(max_workers)),
+        }
+    }
+    
+    /// Ottieni i permessi appropriati per un file
+    async fn acquire_permits(&self, file_path: &Path, file_size: u64) -> Result<ConcurrencyPermits> {
+        let is_video = FileManager::is_video(file_path);
+        
+        if is_video {
+            // Video: sempre seriale, ottieni permesso video
+            let video_permit = self.video_semaphore.clone().acquire_owned().await?;
+            debug!("Acquired video permit for {}", file_path.display());
+            return Ok(ConcurrencyPermits::Video(video_permit));
+        }
+        
+        let size_class = FileSize::classify(file_size);
+        debug!("File {} ({}) classified as {} ", 
+               file_path.display(), 
+               crate::file_manager::FileManager::format_size(file_size),
+               size_class.description());
+        
+        match size_class {
+            FileSize::Small => {
+                let permit = self.small_semaphore.clone().acquire_owned().await?;
+                debug!("Acquired small file permit for {}", file_path.display());
+                Ok(ConcurrencyPermits::Small(permit))
+            }
+            FileSize::Medium => {
+                let permit = self.medium_semaphore.clone().acquire_owned().await?;
+                debug!("Acquired medium file permit for {}", file_path.display());
+                Ok(ConcurrencyPermits::Medium(permit))
+            }
+            FileSize::Large => {
+                // File grandi: acquisisce TUTTI i permessi globali per bloccare tutto il resto
+                info!("🔒 Large file {} detected - acquiring exclusive processing lock", file_path.display());
+                
+                // Prima acquisisce il permesso per file grandi
+                let large_permit = self.large_semaphore.clone().acquire_owned().await?;
+                
+                // Poi cerca di acquisire tutti i permessi globali per bloccare altri processi
+                let available = self.global_large_block.available_permits();
+                let mut global_permits = Vec::new();
+                
+                for _ in 0..available {
+                    if let Ok(permit) = self.global_large_block.clone().try_acquire_owned() {
+                        global_permits.push(permit);
+                    } else {
+                        break;
+                    }
+                }
+                
+                if !global_permits.is_empty() {
+                    info!("🔒 Exclusive lock acquired for large file {} (blocked {} other processes)", 
+                          file_path.display(), global_permits.len());
+                } else {
+                    debug!("Acquired large file permit for {} (no other processes to block)", file_path.display());
+                }
+                
+                Ok(ConcurrencyPermits::Large(large_permit, global_permits))
+            }
+        }
+    }
+}
+
+/// Permessi di concorrenza per diversi tipi di file
+enum ConcurrencyPermits {
+    Small(tokio::sync::OwnedSemaphorePermit),
+    Medium(tokio::sync::OwnedSemaphorePermit),
+    Large(tokio::sync::OwnedSemaphorePermit, Vec<tokio::sync::OwnedSemaphorePermit>), // Include permessi globali
+    Video(tokio::sync::OwnedSemaphorePermit),
+}
+
+impl Drop for ConcurrencyPermits {
+    fn drop(&mut self) {
+        match self {
+            ConcurrencyPermits::Large(_, global_permits) => {
+                if !global_permits.is_empty() {
+                    debug!("🔓 Released exclusive lock for large file");
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Orchestratore principale ottimizzato
 pub struct MediaOptimizer {
     config: Config,
     state_manager: StateManager,
     input_base_dir: PathBuf,
+    concurrency_manager: ConcurrencyManager,
 }
 
 impl MediaOptimizer {
@@ -32,11 +190,13 @@ impl MediaOptimizer {
     pub async fn new(media_dir: &Path, config: Config) -> Result<Self> {
         config.validate()?;
         let state_manager = StateManager::new(media_dir).await?;
+        let concurrency_manager = ConcurrencyManager::new(config.workers);
         
         Ok(Self {
             config,
             state_manager,
             input_base_dir: media_dir.to_path_buf(),
+            concurrency_manager,
         })
     }
     
@@ -151,69 +311,97 @@ impl MediaOptimizer {
         }
     }
     
-    /// Processa file con concorrenza controllata
+    /// Processa file con concorrenza controllata basata sulle dimensioni
     async fn process_files_concurrently(
         &self,
         files: Vec<PathBuf>,
         progress_tracker: ProgressTracker
     ) -> Result<OptimizationStats> {
-        let semaphore = Arc::new(Semaphore::new(self.config.workers));
-        let video_semaphore = Arc::new(Semaphore::new(1)); // Un video alla volta
         let mut tasks: Vec<tokio::task::JoinHandle<Result<Option<ProcessedFile>, anyhow::Error>>> = Vec::new();
         let mut stats = OptimizationStats::new();
 
-        for (index, file_path) in files.iter().enumerate() {
-            let permit = semaphore.clone().acquire_owned().await?;
-            let is_video = FileManager::is_video(file_path);
-            let video_permit = if is_video {
-                Some(video_semaphore.clone().acquire_owned().await?)
+        // Pre-calcola le dimensioni di tutti i file per statistiche
+        let mut file_sizes = Vec::new();
+        let mut small_count = 0;
+        let mut medium_count = 0;
+        let mut large_count = 0;
+        let mut video_count = 0;
+
+        for file_path in &files {
+            if let Ok(metadata) = tokio::fs::metadata(file_path).await {
+                let size = metadata.len();
+                file_sizes.push((file_path.clone(), size));
+                
+                if FileManager::is_video(file_path) {
+                    video_count += 1;
+                } else {
+                    match FileSize::classify(size) {
+                        FileSize::Small => small_count += 1,
+                        FileSize::Medium => medium_count += 1,
+                        FileSize::Large => large_count += 1,
+                    }
+                }
             } else {
-                None
-            };
+                file_sizes.push((file_path.clone(), 0));
+            }
+        }
+
+        if !self.config.json_output {
+            info!("📊 File size distribution:");
+            info!("  • Small files (<5MB): {} files", small_count);
+            info!("  • Medium files (5-20MB): {} files", medium_count);
+            info!("  • Large files (>20MB): {} files", large_count);
+            info!("  • Video files: {} files", video_count);
+        }
+
+        for (index, (file_path, file_size)) in file_sizes.into_iter().enumerate() {
+            // Ottieni i permessi appropriati in base alla dimensione del file
+            let permits = self.concurrency_manager.acquire_permits(&file_path, file_size).await?;
 
             let mut task_optimizer = TaskOptimizer::new(self.config.clone(), self.input_base_dir.clone()).await?;
             let progress_clone = progress_tracker.clone();
-            let file_path_clone = file_path.clone();
+            let is_video = FileManager::is_video(&file_path);
 
             let task = tokio::spawn(async move {
-                let _permit = permit;
-                let _video_permit = video_permit;
+                let _permits = permits; // I permessi vengono rilasciati automaticamente quando il task finisce
 
                 // Emetti evento inizio file
                 if task_optimizer.config.json_output {
-                    if let Ok(metadata) = tokio::fs::metadata(&file_path_clone).await {
-                        JsonMessage::file_start(
-                            file_path_clone.clone(),
-                            metadata.len(),
-                            index,
-                            progress_clone.total_files,
-                        ).emit();
-                    }
+                    JsonMessage::file_start(
+                        file_path.clone(),
+                        file_size,
+                        index,
+                        progress_clone.total_files,
+                    ).emit();
                 }
 
-                // Timeout basato sul tipo di file
+                // Timeout basato sul tipo di file e dimensione
                 let timeout_duration = if is_video {
                     std::time::Duration::from_secs(900) // 15 minuti per video
                 } else {
-                    std::time::Duration::from_secs(180) // 3 minuti per immagini
+                    match FileSize::classify(file_size) {
+                        FileSize::Small => std::time::Duration::from_secs(120),  // 2 minuti per file piccoli
+                        FileSize::Medium => std::time::Duration::from_secs(300), // 5 minuti per file medi
+                        FileSize::Large => std::time::Duration::from_secs(1200), // 20 minuti per file grandi
+                    }
                 };
                 
                 let result = tokio::time::timeout(
                     timeout_duration,
-                    task_optimizer.process_single_file(file_path_clone.clone())
+                    task_optimizer.process_single_file(file_path.clone())
                 ).await;
                 
                 let result = match result {
                     Ok(r) => r,
                     Err(_) => {
-                        error!("File processing timed out: {}", file_path_clone.display());
-                        Self::handle_timeout(&task_optimizer, &file_path_clone).await;
+                        error!("File processing timed out after {:?}: {}", timeout_duration, file_path.display());
+                        Self::handle_timeout(&task_optimizer, &file_path).await;
                         Err(anyhow::anyhow!("Processing timeout"))
                     }
                 };
 
                 // Gestisci risultati e eventi JSON
-                progress_clone.handle_file_completion(&task_optimizer.config, &file_path_clone, &result).await;
+                progress_clone.handle_file_completion(&task_optimizer.config, &file_path, &result).await;
                 result
             });
 
@@ -361,7 +549,7 @@ impl MediaOptimizer {
         let estimated_thumbnails = resizer.estimate_thumbnail_count(&output_images);
         info!("Will create {} thumbnails total", estimated_thumbnails);
 
-        // Processo i thumbnails con concorrenza controllata
+        // Processo i thumbnails con concorrenza controllata per file piccoli (thumbnails sono sempre piccoli)
         let semaphore = Arc::new(Semaphore::new(self.config.workers.min(4))); // Limite per i thumbnails
         let mut tasks: Vec<tokio::task::JoinHandle<Result<usize, anyhow::Error>>> = Vec::new();
 
@@ -455,7 +643,7 @@ impl MediaOptimizer {
         let estimated_thumbnails = resizer.estimate_thumbnail_count(&image_files.iter().map(|p| (*p).clone()).collect::<Vec<_>>());
         info!("Will create {} thumbnails total from originals", estimated_thumbnails);
 
-        // Processo i thumbnails con concorrenza controllata
+        // Processo i thumbnails con concorrenza controllata per file piccoli (thumbnails sono sempre piccoli)
         let semaphore = Arc::new(Semaphore::new(self.config.workers.min(4))); // Limite per i thumbnails
         let mut tasks: Vec<tokio::task::JoinHandle<Result<usize, anyhow::Error>>> = Vec::new();
 

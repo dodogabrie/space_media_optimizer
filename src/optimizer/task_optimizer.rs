@@ -112,6 +112,8 @@ impl TaskOptimizer {
     async fn optimize_file(&mut self, file_path: &Path) -> Result<PathBuf> {
         if FileManager::is_image(file_path) {
             // debug!("Processing as image: {}", file_path.display());
+            
+            // ImageProcessor now handles pre-resize internally
             self.image_processor.optimize(file_path, &self.input_base_dir).await
                 .map_err(|e| anyhow::anyhow!("Image optimization failed for {}: {}", file_path.display(), e))
         } else if FileManager::is_video(file_path) {
