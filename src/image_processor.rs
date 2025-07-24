@@ -26,7 +26,6 @@
 //! | JPEG    | ✅    | ✅     | mozjpeg, jpegoptim, jpegtran |
 //! | PNG     | ✅    | ✅     | oxipng, optipng, pngcrush |
 //! | WebP    | ✅    | ✅     | cwebp (conversion + optimization) |
-//! | Altri   | ✅    | ❌     | Errore (no optimization) |
 //! 
 //! ## Pipeline di Ottimizzazione
 //! 
@@ -355,151 +354,162 @@ impl ImageProcessor {
         result
     }
 
-    /// Optimizes JPEG images using the best available tool in order of preference.
+    /// Optimizes JPEG images using jpegoptim.
     /// 
-    /// **Tool Priority (best to worst):**
-    /// 1. **mozjpeg**: Best compression ratio, precise quality control, progressive encoding
-    /// 2. **jpegoptim**: Good compression, quality control, outputs to stdout for safe handling
-    /// 3. **jpegtran**: Lossless optimization only, no quality control but very safe
-    /// 
-    /// **Quality Settings:**
-    /// - Uses `config.jpeg_quality` (1-100) for mozjpeg and jpegoptim
-    /// - jpegtran performs lossless optimization regardless of quality setting
-    /// - **Returns error if no tools are available** (no silent copying)
+    /// **Tool Used:** jpegoptim with stdout output
+    /// **Quality Setting:** Uses `config.jpeg_quality` (1-100)
+    /// **Returns error if jpegoptim is not available**
     async fn optimize_jpeg(&mut self, input: &str, output: &str) -> Result<PathBuf> {
-        // debug!("Starting JPEG optimization: {} -> {}", input, output);
-
-        // Special handling for jpegoptim which outputs to stdout
-        let platform = PlatformCommands::instance();
-        if platform.is_command_available("jpegoptim").await {
-            if self.should_stop() {
-                return Err(anyhow::anyhow!("JPEG optimization cancelled by user"));
-            }
-
-            // debug!("Attempting JPEG optimization with jpegoptim (quality: {})", self.config.jpeg_quality);
-            let args = to_string_vec([
-                &format!("--max={}", self.config.jpeg_quality),
-                "--stdout",
-                input,
-            ]);
-
-            if self.run_tool_with_stdout_output("jpegoptim", &args, output).await? {
-                // debug!("JPEG optimized successfully with jpegoptim");
-                return Ok(PathBuf::from(output));
-            }
+        if self.should_stop() {
+            return Err(anyhow::anyhow!("JPEG optimization cancelled by user"));
         }
 
-        // Define tools with their argument builders (excluding jpegoptim handled above)
-        let tools: &[(&str, fn(&str, &str, &Config) -> Vec<String>)] = &[
-            ("mozjpeg", |input, output, config| to_string_vec([
-                "-quality", &config.jpeg_quality.to_string(),
-                "-optimize",
-                "-progressive",
-                "-outfile", output,
-                input,
-            ])),
-            ("jpegtran", |input, output, _config| to_string_vec([
-                "-optimize",
-                "-progressive",
-                "-outfile", output,
-                input,
-            ])),
-        ];
+        let platform = PlatformCommands::instance();
+        if !platform.is_command_available("jpegoptim").await {
+            return Err(anyhow::anyhow!("jpegoptim not found. Install with: sudo apt-get install jpegoptim"));
+        }
 
-        self.try_optimization_tools(input, output, tools, "JPEG").await
+        debug!("Optimizing JPEG with jpegoptim (quality: {})", self.config.jpeg_quality);
+        let args = to_string_vec([
+            &format!("--max={}", self.config.jpeg_quality),
+            "--stdout",
+            input,
+        ]);
+
+        if self.run_tool_with_stdout_output("jpegoptim", &args, output).await? {
+            debug!("JPEG optimized successfully with jpegoptim");
+            return Ok(PathBuf::from(output));
+        } else {
+            return Err(anyhow::anyhow!("jpegoptim failed to optimize: {}", input));
+        }
     }
 
-    /// Optimizes PNG images using the best available tool in order of preference.
+    /// Optimizes PNG images using oxipng.
     /// 
-    /// **Tool Priority (best to worst):**
-    /// 1. **oxipng**: Fast, excellent compression, safe metadata stripping
-    /// 2. **optipng**: Aggressive compression with multiple trials, complete metadata stripping
-    /// 3. **pngcrush**: Brute force optimization, slower but very effective
-    /// 
-    /// **Optimization Features:**
-    /// - All tools perform lossless compression (no quality degradation)
-    /// - Metadata stripping for smaller file sizes and privacy
-    /// - Progressive optimization levels for best compression ratios
-    /// - **Returns error if no tools are available** (no silent copying)
+    /// **Tool Used:** oxipng with level 6 optimization and metadata stripping
+    /// **Features:** Lossless compression, metadata stripping for privacy
+    /// **Returns error if oxipng is not available**
     async fn optimize_png(&mut self, input: &str, output: &str) -> Result<PathBuf> {
-        // debug!("Starting PNG optimization: {} -> {}", input, output);
+        if self.should_stop() {
+            return Err(anyhow::anyhow!("PNG optimization cancelled by user"));
+        }
 
-        // Define tools with their argument builders
-        let tools: &[(&str, fn(&str, &str, &Config) -> Vec<String>)] = &[
-            ("oxipng", |input, output, _config| to_string_vec([
-                "-o", "6",
-                "--strip", "all",
-                "--out", output,
-                input,
-            ])),
-            ("optipng", |input, output, _config| to_string_vec([
-                "-o7",
-                "-strip", "all",
-                "-out", output,
-                input,
-            ])),
-            ("pngcrush", |input, output, _config| to_string_vec([
-                "-rem", "alla",
-                "-brute",
-                input,
-                output,
-            ])),
-        ];
+        let platform = PlatformCommands::instance();
+        if !platform.is_command_available("oxipng").await {
+            return Err(anyhow::anyhow!("oxipng not found. Install with: sudo apt-get install oxipng"));
+        }
 
-        self.try_optimization_tools(input, output, tools, "PNG").await
+        debug!("Optimizing PNG with oxipng");
+        let args = to_string_vec([
+            "-o", "6",
+            "--strip", "all",
+            "--out", output,
+            input,
+        ]);
+
+        let tool_path = platform.get_tool_path("oxipng")
+            .unwrap_or_else(|| PathBuf::from("oxipng"));
+
+        let start_time = std::time::Instant::now();
+        let success = Command::new(&tool_path)
+            .args(&args)
+            .status()
+            .await?
+            .success();
+        let elapsed = start_time.elapsed();
+
+        if success {
+            debug!("PNG optimized successfully with oxipng in {:?}", elapsed);
+            Ok(PathBuf::from(output))
+        } else {
+            Err(anyhow::anyhow!("oxipng failed to optimize: {}", input))
+        }
     }
 
     /// Optimizes existing WebP images using cwebp.
     /// 
-    /// WebP optimization re-encodes the image with the configured quality setting
-    /// to potentially achieve better compression than the original encoding.
-    /// 
-    /// **Optimization Features:**
-    /// - Quality-controlled re-encoding using `config.webp_quality`
-    /// - Multi-threading support for faster processing (`-mt`)
-    /// - Balanced encoding method (`-m 4`) for good speed/quality ratio
-    /// - **Returns error if cwebp is not available** (no silent copying)
+    /// **Tool Used:** cwebp with quality control and multi-threading
+    /// **Quality Setting:** Uses `config.webp_quality` (1-100)
+    /// **Returns error if cwebp is not available**
     async fn optimize_webp(&mut self, input: &str, output: &str) -> Result<PathBuf> {
-        // debug!("Starting WebP optimization: {} -> {} (quality: {})", input, output, self.config.webp_quality);
+        if self.should_stop() {
+            return Err(anyhow::anyhow!("WebP optimization cancelled by user"));
+        }
 
-        let tools: &[(&str, fn(&str, &str, &Config) -> Vec<String>)] = &[
-            ("cwebp", |input, output, config| to_string_vec([
-                "-q", &config.webp_quality.to_string(),
-                "-m", "4",
-                "-mt",
-                input,
-                "-o", output,
-            ])),
-        ];
+        let platform = PlatformCommands::instance();
+        if !platform.is_command_available("cwebp").await {
+            return Err(anyhow::anyhow!("cwebp not found. Install with: sudo apt-get install webp"));
+        }
 
-        self.try_optimization_tools(input, output, tools, "WebP").await
+        debug!("Optimizing WebP with cwebp (quality: {})", self.config.webp_quality);
+        let args = to_string_vec([
+            "-q", &self.config.webp_quality.to_string(),
+            "-m", "4",
+            "-mt",
+            input,
+            "-o", output,
+        ]);
+
+        let tool_path = platform.get_tool_path("cwebp")
+            .unwrap_or_else(|| PathBuf::from("cwebp"));
+
+        let start_time = std::time::Instant::now();
+        let success = Command::new(&tool_path)
+            .args(&args)
+            .status()
+            .await?
+            .success();
+        let elapsed = start_time.elapsed();
+
+        if success {
+            debug!("WebP optimized successfully with cwebp in {:?}", elapsed);
+            Ok(PathBuf::from(output))
+        } else {
+            Err(anyhow::anyhow!("cwebp failed to optimize: {}", input))
+        }
     }
 
     /// Converts any supported image format to WebP using cwebp.
     /// 
-    /// This method converts JPEG, PNG, and other formats to WebP format with
-    /// the configured quality setting. The conversion can significantly reduce
-    /// file sizes while maintaining good visual quality.
-    /// 
-    /// **Conversion Features:**
-    /// - Supports all formats that cwebp can read (JPEG, PNG, TIFF, etc.)
-    /// - Quality-controlled encoding using `config.webp_quality`
-    /// - Multi-threading support for faster processing
-    /// - Optimized encoding method for best compression
+    /// **Tool Used:** cwebp with quality control and multi-threading
+    /// **Quality Setting:** Uses `config.webp_quality` (1-100)
+    /// **Returns error if cwebp is not available**
     async fn convert_to_webp(&mut self, input: &str, output: &str) -> Result<PathBuf> {
-        // debug!("Converting to WebP: {} -> {} (quality: {})", input, output, self.config.webp_quality);
+        if self.should_stop() {
+            return Err(anyhow::anyhow!("WebP conversion cancelled by user"));
+        }
 
-        let tools: &[(&str, fn(&str, &str, &Config) -> Vec<String>)] = &[
-            ("cwebp", |input, output, config| to_string_vec([
-                "-q", &config.webp_quality.to_string(),
-                "-m", "4",
-                "-mt",
-                input,
-                "-o", output,
-            ])),
-        ];
+        let platform = PlatformCommands::instance();
+        if !platform.is_command_available("cwebp").await {
+            return Err(anyhow::anyhow!("cwebp not found. Install with: sudo apt-get install webp"));
+        }
 
-        self.try_optimization_tools(input, output, tools, "WebP conversion").await
+        debug!("Converting to WebP with cwebp (quality: {})", self.config.webp_quality);
+        let args = to_string_vec([
+            "-q", &self.config.webp_quality.to_string(),
+            "-m", "4",
+            "-mt",
+            input,
+            "-o", output,
+        ]);
+
+        let tool_path = platform.get_tool_path("cwebp")
+            .unwrap_or_else(|| PathBuf::from("cwebp"));
+
+        let start_time = std::time::Instant::now();
+        let success = Command::new(&tool_path)
+            .args(&args)
+            .status()
+            .await?
+            .success();
+        let elapsed = start_time.elapsed();
+
+        if success {
+            debug!("WebP conversion completed successfully with cwebp in {:?}", elapsed);
+            Ok(PathBuf::from(output))
+        } else {
+            Err(anyhow::anyhow!("cwebp failed to convert: {}", input))
+        }
     }
 
     /// Calculates the output path for an optimized image based on configuration.
@@ -574,47 +584,22 @@ impl ImageProcessor {
         }
     }
 
-    /// Prints a report of available optimization tools to the log.
+    /// Prints a report of the 3 essential optimization tools.
     /// 
-    /// This method checks for the availability of all external tools used by the
-    /// image processor and logs their status. Useful for // debugging and system
-    /// setup verification.
-    /// 
-    /// **Checked Tools:**
-    /// - **JPEG**: mozjpeg, jpegoptim, jpegtran
-    /// - **PNG**: oxipng, optipng, pngcrush
-    /// - **WebP**: cwebp
-    /// - **Metadata**: exiftool (for future use)
-    /// 
-    /// **Output Format:**
-    /// ```
-    /// 🔧 Checking available optimization tools:
-    ///   ✅ mozjpeg - JPEG optimization
-    ///   ❌ jpegoptim - JPEG optimization
-    ///   ✅ oxipng - PNG optimization
-    ///   ...
-    /// ```
-    /// 
-    /// # Example
-    /// ```rust
-    /// let processor = ImageProcessor::new(config).await?;
-    /// processor.// print_available_tools().await;
-    /// ```
+    /// **Essential Tools:**
+    /// - jpegoptim: JPEG optimization with quality control
+    /// - oxipng: PNG lossless optimization with metadata stripping
+    /// - cwebp: WebP conversion and optimization
     pub async fn print_available_tools(&self) {
         let platform = PlatformCommands::instance();
         
-        info!("🔧 Checking available optimization tools:");
+        info!("🔧 Checking essential optimization tools:");
         
-        // List of tools to check with their descriptions
+        // Essential tools with their descriptions
         let tools = [
-            ("mozjpeg", "JPEG optimization (best quality)"),
-            ("jpegoptim", "JPEG optimization (good alternative)"),
-            ("jpegtran", "JPEG optimization (lossless only)"),
-            ("oxipng", "PNG optimization (fast and effective)"),
-            ("optipng", "PNG optimization (aggressive)"),
-            ("pngcrush", "PNG optimization (brute force)"),
+            ("jpegoptim", "JPEG optimization with quality control"),
+            ("oxipng", "PNG lossless optimization"),
             ("cwebp", "WebP conversion and optimization"),
-            ("exiftool", "Metadata preservation (future use)"),
         ];
 
         // Check each tool and log its availability
@@ -625,92 +610,56 @@ impl ImageProcessor {
         }
     }
 
-    /// Checks for the availability of optimization tool dependencies.
+    /// Checks for the availability of the 3 essential optimization tools.
     /// 
-    /// This method provides a comprehensive check to verify that at least some 
-    /// optimization tools are available. It's more permissive than before - 
-    /// it only requires that at least one optimization tool is available,
-    /// rather than requiring tools for all formats.
-    /// 
-    /// # Validation Strategy
-    /// - Checks for availability of any optimization tools
-    /// - Warns about missing tool categories but doesn't fail
-    /// - Only fails if no optimization tools are available at all
+    /// **Required Tools:**
+    /// - jpegoptim (JPEG optimization)
+    /// - oxipng (PNG optimization) 
+    /// - cwebp (WebP conversion/optimization)
     /// 
     /// # Returns
-    /// * `Result<()>` - Success if at least some tools are available, error only if no tools found
-    /// 
-    /// # Example
-    /// ```rust
-    /// // Check dependencies before processing
-    /// ImageProcessor::check_dependencies().await?;
-    /// 
-    /// // Proceed with image processing
-    /// let processor = ImageProcessor::new(config).await?;
-    /// ```
-    /// 
-    /// # Tool Requirements
-    /// - At least one optimization tool must be available
-    /// - Missing tools for specific formats will cause errors only when those formats are encountered
+    /// * `Result<()>` - Success if all tools are available, error with install instructions if any are missing
     pub async fn check_dependencies() -> Result<()> {
         let platform = PlatformCommands::instance();
-        let mut available_tools = Vec::new();
-        let mut missing_categories = Vec::new();
+        let mut missing_tools = Vec::new();
         
-        info!("🔧 Checking image optimization tool dependencies...");
+        info!("🔧 Checking essential optimization tools...");
         
-        // Check JPEG tools
-        let jpeg_tools = ["mozjpeg", "jpegoptim", "jpegtran"];
-        let has_jpeg_tool = jpeg_tools.iter()
-            .any(|tool| futures::executor::block_on(platform.is_command_available(tool)));
-        
-        if has_jpeg_tool {
-            available_tools.push("JPEG optimization");
+        // Check jpegoptim
+        if !platform.is_command_available("jpegoptim").await {
+            missing_tools.push("jpegoptim (sudo apt-get install jpegoptim)");
         } else {
-            missing_categories.push("JPEG optimization (install one of: mozjpeg, jpegoptim, jpegtran)");
+            info!("✅ jpegoptim - JPEG optimization");
         }
         
-        // Check PNG tools  
-        let png_tools = ["oxipng", "optipng", "pngcrush"];
-        let has_png_tool = png_tools.iter()
-            .any(|tool| futures::executor::block_on(platform.is_command_available(tool)));
-        
-        if has_png_tool {
-            available_tools.push("PNG optimization");
+        // Check oxipng
+        if !platform.is_command_available("oxipng").await {
+            missing_tools.push("oxipng (sudo apt-get install oxipng)");
         } else {
-            missing_categories.push("PNG optimization (install one of: oxipng, optipng, pngcrush)");
+            info!("✅ oxipng - PNG optimization");
         }
         
-        // Check WebP tools
-        let has_webp_tool = platform.is_command_available("cwebp").await;
-        if has_webp_tool {
-            available_tools.push("WebP conversion/optimization");
+        // Check cwebp
+        if !platform.is_command_available("cwebp").await {
+            missing_tools.push("cwebp (sudo apt-get install webp)");
         } else {
-            missing_categories.push("WebP conversion/optimization (install: libwebp/webp package with cwebp)");
+            info!("✅ cwebp - WebP conversion/optimization");
         }
         
-        // Report available tools
-        if !available_tools.is_empty() {
-            info!("✅ Available optimization tools: {}", available_tools.join(", "));
-        }
-        
-        // Warn about missing tools but don't fail
-        if !missing_categories.is_empty() {
-            warn!("⚠️ Missing optimization tools (will cause errors if these formats are encountered):");
-            for category in &missing_categories {
-                warn!("  ❌ {}", category);
-            }
-        }
-        
-        // Only fail if no tools are available at all
-        if available_tools.is_empty() {
-            let error_msg = "No image optimization tools available! Please install at least one of: mozjpeg, jpegoptim, jpegtran, oxipng, optipng, pngcrush, or cwebp";
+        if missing_tools.is_empty() {
+            info!("🎯 All essential optimization tools are available!");
+            Ok(())
+        } else {
+            let error_msg = format!(
+                "Missing essential optimization tools:\n{}",
+                missing_tools.iter()
+                    .map(|tool| format!("  ❌ {}", tool))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
             error!("{}", error_msg);
-            return Err(anyhow::anyhow!(error_msg));
+            Err(anyhow::anyhow!(error_msg))
         }
-        
-        info!("🎯 Tool dependency check passed - {} categories available", available_tools.len());
-        Ok(())
     }
     
     /// Checks if WebP conversion/optimization is supported on this system.
@@ -755,92 +704,6 @@ impl ImageProcessor {
     /// ```
     pub fn create_cancellation_channel(capacity: usize) -> (broadcast::Sender<()>, broadcast::Receiver<()>) {
         broadcast::channel(capacity)
-    }
-
-    /// Generic helper for trying multiple optimization tools in order of preference.
-    /// 
-    /// This helper reduces code duplication by providing a common pattern for:
-    /// 1. Checking tool availability
-    /// 2. Checking for cancellation
-    /// 3. Running the tool with appropriate arguments
-    /// 4. Handling success/failure
-    /// 5. Trying the next tool on failure
-    /// 
-    /// # Arguments
-    /// * `input` - Input file path
-    /// * `output` - Output file path  
-    /// * `tools` - List of (tool_name, args_builder_fn) tuples in order of preference
-    /// * `format_name` - Format name for error messages (e.g., "JPEG", "PNG")
-    /// 
-    /// # Returns
-    /// * `Result<PathBuf>` - Success with output path, or error if all tools fail
-    async fn try_optimization_tools<F>(
-        &mut self,
-        input: &str,
-        output: &str,
-        tools: &[(&str, F)],
-        format_name: &str,
-    ) -> Result<PathBuf>
-    where
-        F: Fn(&str, &str, &Config) -> Vec<String>,
-    {
-        let platform = PlatformCommands::instance();
-        let mut any_tool_available = false;
-
-        for (tool_name, args_builder) in tools {
-            if platform.is_command_available(tool_name).await {
-                any_tool_available = true;
-
-                // Check for cancellation before each tool attempt
-                if self.should_stop() {
-                    return Err(anyhow::anyhow!("{} optimization cancelled by user", format_name));
-                }
-
-                debug!("Attempting {} optimization with {}", format_name, tool_name);
-                
-                // Get the resolved tool path (bundled or system)
-                let tool_path = platform.get_tool_path(tool_name)
-                    .unwrap_or_else(|| PathBuf::from(tool_name));
-                
-                debug!("Using tool path: {:?}", tool_path);
-                
-                let args = args_builder(input, output, &self.config);
-                debug!("Command arguments: {:?}", args);
-                
-                let start_time = std::time::Instant::now();
-                let success = Command::new(&tool_path)
-                    .args(&args)
-                    .status()
-                    .await?
-                    .success();
-                let elapsed = start_time.elapsed();
-
-                if success {
-                    debug!("{} optimized successfully with {} in {:?}", format_name, tool_name, elapsed);
-                    return Ok(PathBuf::from(output));
-                } else {
-                    warn!("{} optimization failed with {} after {:?}, trying next tool", tool_name, format_name, elapsed);
-                }
-            }
-        }
-
-        // Handle case where no tools are available or all failed
-        if !any_tool_available {
-            let tool_names: Vec<&str> = tools.iter().map(|(name, _)| *name).collect();
-            error!("No {} optimization tools available ({})", format_name, tool_names.join("/"));
-            Err(anyhow::anyhow!(
-                "No {} optimization tools available. Please install one of: {}",
-                format_name,
-                tool_names.join(", ")
-            ))
-        } else {
-            error!("All {} optimization tools failed for: {}", format_name, input);
-            Err(anyhow::anyhow!(
-                "All {} optimization tools failed to optimize: {}",
-                format_name,
-                input
-            ))
-        }
     }
 
     /// Helper for tools that output to stdout (like jpegoptim).

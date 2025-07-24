@@ -46,3 +46,4 @@ pub use state::{StateFile, ProcessedFile};
 pub use optimizer::MediaOptimizer;
 pub use json_output::{JsonMessage, JsonConfig, HistoricalStats};
 pub use resize::{ImageResizer, ResizeAlgorithm, ResizeMode};
+pub use tool_resolver::ToolPathResolver;
